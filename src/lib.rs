@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 // private modules
+mod constants;
 mod digest;
 mod math;
 mod nifs;
@@ -36,6 +37,7 @@ mod macros;
 // public modules
 pub mod bellpepper;
 pub mod errors;
+pub mod gadgets;
 pub mod provider;
 pub mod traits;
 

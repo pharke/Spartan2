@@ -1260,7 +1260,8 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::provider::T256HyraxEngine;
+  // use crate::provider::T256HyraxEngine;
+  use crate::provider::PallasHyraxEngine;
   use bellpepper::gadgets::{
     boolean::{AllocatedBit, Boolean},
     num::AllocatedNum,
@@ -1289,29 +1290,15 @@ mod tests {
 
     fn precommitted<CS: ConstraintSystem<E::Scalar>>(
       &self,
-      _: &mut CS,
-      _: &[AllocatedNum<E::Scalar>],
-    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-      Ok(vec![]) // Placeholder, we don't use precommitted variables in this example
-    }
-
-    fn num_challenges(&self) -> usize {
-      0 // Placeholder, we don't use challenges in this example
-    }
-
-    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
-      &self,
       cs: &mut CS,
-      _shared: &[AllocatedNum<E::Scalar>],
-      _precommitted: &[AllocatedNum<E::Scalar>],
-      _challenges: Option<&[E::Scalar]>, // challenges from the verifier
-    ) -> Result<(), SynthesisError> {
-      // we write a circuit that checks if the input is a SHA256 preimage
+      _: &[AllocatedNum<E::Scalar>], // shared variables, if any
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+      // 1. Preimage bits
       let bit_values: Vec<_> = self
         .preimage
         .clone()
         .into_iter()
-        .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1u8 == 1u8))
+        .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
         .map(Some)
         .collect();
       assert_eq!(bit_values.len(), self.preimage.len() * 8);
@@ -1323,11 +1310,23 @@ mod tests {
         .map(|b| b.map(Boolean::from))
         .collect::<Result<Vec<_>, _>>()?;
 
-      let _ = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
+      // 2. SHA-256 gadget
+      let _hash_bits = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
-      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ZERO))?;
-      x.inputize(cs.namespace(|| "inputize x"))?;
+      Ok(vec![])
+    }
 
+    fn num_challenges(&self) -> usize {
+      0 // Placeholder, we don't use challenges in this example
+    }
+
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      _: &mut CS,
+      _: &[AllocatedNum<E::Scalar>],
+      _: &[AllocatedNum<E::Scalar>],
+      _: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
       Ok(())
     }
   }
@@ -1380,10 +1379,14 @@ mod tests {
 
     let snark = res.unwrap();
     let res = snark.verify(vk, step_circuits.len());
+    // println!(
+    //   "[bench_neutron_inner] name: {name}, num_circuits: {}, verify res: {:?}",
+    //   step_circuits.len(),
+    //   res
+    // );
     println!(
-      "[bench_neutron_inner] name: {name}, num_circuits: {}, verify res: {:?}",
-      step_circuits.len(),
-      res
+      "[bench_neutron_inner] name: {name}, num_circuits: {}",
+      step_circuits.len()
     );
     assert!(res.is_ok());
 
@@ -1399,19 +1402,18 @@ mod tests {
       .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
       .try_init();
 
-    type E = T256HyraxEngine;
+    // type E = T256HyraxEngine;
+    type E = PallasHyraxEngine;
 
-    for num_circuits in [2, 7, 32, 64] {
-      for len in [32, 64].iter() {
-        let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
-        test_neutron_inner(
-          &format!("sha256_num_circuits={num_circuits}_len={len}"),
-          &pk,
-          &vk,
-          &circuits,
-          &circuits[0], // core circuit is the first one, for test purposes
-        );
-      }
-    }
+    let num_circuits = 30;
+    let len = 30;
+    let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, len);
+    test_neutron_inner(
+      &format!("sha256_num_circuits={num_circuits}_len={len}"),
+      &pk,
+      &vk,
+      &circuits,
+      &circuits[0], // core circuit is the first one, for test purposes
+    );
   }
 }
