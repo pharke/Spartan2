@@ -9,7 +9,7 @@
 //! - 使用 `AllocatedPoint::scalar_mul` 实现标量乘，并统计该电路的 R1CS 约束数量；
 //! - 通过 `SpartanZkSNARK` 完整跑一遍 {setup, prove, verify} 流程。
 
-use bellpepper::gadgets::boolean::AllocatedBit;
+use bellpepper::gadgets::boolean::{AllocatedBit, field_into_allocated_bits_le};
 use bellpepper_core::{
   num::AllocatedNum,
   ConstraintSystem,
@@ -48,9 +48,9 @@ type CurveG = p256::Point;
 /// - k 由 `scalar_bits` 给出（布尔 witness，最低位在前）；
 /// - Q 由宿主代码根据 (G, k) 预先计算，并作为 public input 暴露；
 #[derive(Clone, Debug)]
-struct EccDlCircuit<Scalar: ff::PrimeField + PrimeFieldBits> {
+struct P256DlCircuit<Scalar: ff::PrimeField + PrimeFieldBits> {
   /// 标量 k 的二进制展开（用于为标量位分配期望值，方便统计约束）
-  scalar_bits: Vec<bool>,
+  secret: Scalar,
   /// 基点 G.x（已在宿主侧转换到证明域）
   g_x: Scalar,
   /// 基点 G.y（已在宿主侧转换到证明域）
@@ -62,20 +62,40 @@ struct EccDlCircuit<Scalar: ff::PrimeField + PrimeFieldBits> {
   _p: PhantomData<Scalar>,
 }
 
-impl<Scalar: ff::PrimeField + PrimeFieldBits> EccDlCircuit<Scalar> {
-  fn new(scalar_bits: Vec<bool>, g_x: Scalar, g_y: Scalar, q_x: Scalar, q_y: Scalar) -> Self {
+impl<Scalar: ff::PrimeField + PrimeFieldBits> P256DlCircuit<Scalar> {
+  fn new(secret: Scalar) -> Self {
+    
+    // 生成一个随机的 P256 标量 k
+    type P256Scalar = p256::Scalar;
+    type P256Base = p256::Base;
+    let secret_p256 = field_switch::<Scalar, P256Scalar>(secret);
+    // P256 生成元及 Q = [k]G
+    let g_p256 = CurveG::generator();
+    let q_p256 = g_p256 * secret_p256;
+    let (qx_base, qy_base, inf) = q_p256.to_coordinates();
+    assert!(!inf, "Q should not be infinity");
+
+    // 将 P256 Base 域坐标转换到证明域 E::Scalar（这里是 T256::Scalar）
+    let g_coords = g_p256.to_coordinates();
+    let gx_scalar: Scalar =
+      field_switch::<P256Base, Scalar>(g_coords.0);
+    let gy_scalar: Scalar =
+      field_switch::<P256Base, Scalar>(g_coords.1);
+
+    let qx_scalar: Scalar = field_switch::<P256Base, Scalar>(qx_base);
+    let qy_scalar: Scalar = field_switch::<P256Base, Scalar>(qy_base);
     Self {
-      scalar_bits,
-      g_x,
-      g_y,
-      q_x,
-      q_y,
+      secret,
+      g_x: gx_scalar,
+      g_y: gy_scalar,
+      q_x: qx_scalar,
+      q_y: qy_scalar,
       _p: PhantomData,
     }
   }
 }
 
-impl<Ec: Engine> SpartanCircuit<Ec> for EccDlCircuit<Ec::Scalar> {
+impl<Ec: Engine> SpartanCircuit<Ec> for P256DlCircuit<Ec::Scalar> {
   fn public_values(&self) -> Result<Vec<Ec::Scalar>, SynthesisError> {
     // 公开 Q = [k]G 的坐标
     Ok(vec![self.q_x, self.q_y])
@@ -83,9 +103,10 @@ impl<Ec: Engine> SpartanCircuit<Ec> for EccDlCircuit<Ec::Scalar> {
 
   fn shared<CS: ConstraintSystem<Ec::Scalar>>(
     &self,
-    _cs: &mut CS,
+    cs: &mut CS,
   ) -> Result<Vec<AllocatedNum<Ec::Scalar>>, SynthesisError> {
-    Ok(vec![])
+    let secret = AllocatedNum::alloc(cs.namespace(|| "secret"), || Ok(self.secret))?;
+    Ok(vec![secret])
   }
 
   fn precommitted<CS: ConstraintSystem<Ec::Scalar>>(
@@ -105,7 +126,7 @@ impl<Ec: Engine> SpartanCircuit<Ec> for EccDlCircuit<Ec::Scalar> {
   fn synthesize<CS: ConstraintSystem<Ec::Scalar>>(
     &self,
     cs: &mut CS,
-    _shared: &[AllocatedNum<Ec::Scalar>],
+    shared: &[AllocatedNum<Ec::Scalar>],
     _precommitted: &[AllocatedNum<Ec::Scalar>],
     _challenges: Option<&[Ec::Scalar]>,
   ) -> Result<(), SynthesisError> {
@@ -116,18 +137,11 @@ impl<Ec: Engine> SpartanCircuit<Ec> for EccDlCircuit<Ec::Scalar> {
     )?;
     g.check_on_curve(cs.namespace(|| "G on curve"))?;
 
-    // 2. 分配标量位 k_i（布尔 witness），最低位在前
-    let mut bits = Vec::with_capacity(self.scalar_bits.len());
-    for (i, b) in self.scalar_bits.iter().enumerate() {
-      let bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("k_bit_{i}")),
-        Some(*b),
-      )?;
-      bits.push(bit);
-    }
+    // 2.将secret转换为AllocatedBits
+    let secret_bits = field_into_allocated_bits_le(cs.namespace(|| "secret_bits"), shared[0].get_value().as_ref().copied())?;
 
     // 3. 计算 r = [k]g，并做一个基础的 on-curve 检查
-    let r = g.scalar_mul(cs.namespace(|| "scalar_mul"), &bits)?;
+    let r = g.scalar_mul(cs.namespace(|| "scalar_mul"), &secret_bits)?;
     r.check_on_curve(cs.namespace(|| "R on curve"))?;
 
     // 4. 约束 r 的坐标等于公开输入 Q 的坐标
@@ -160,37 +174,9 @@ fn main() {
     .with_env_filter(EnvFilter::from_default_env())
     .init();
 
-  // 生成一个随机的 P256 标量 k
-  type P256Scalar = p256::Scalar;
-  type P256Base = p256::Base;
-
-  let k_p256 = P256Scalar::random(&mut OsRng);
-  info!("Generated random scalar k (P256)");
-
-  // 将标量 k 转换为二进制位（最低位在前）
-  // 使用 P256 标量域的位数，但为了演示可以限制位数（例如 256 位）
-  let k_bits_le = k_p256.to_le_bits();
-  let scalar_bits: Vec<bool> = k_bits_le.iter().map(|b| *b).collect();
-  info!("Converted scalar k to {} bits", scalar_bits.len());
-
-  // P256 生成元及 Q = [k]G
-  let g_p256 = CurveG::generator();
-  let q_p256 = g_p256 * k_p256;
-  let (qx_base, qy_base, inf) = q_p256.to_coordinates();
-  assert!(!inf, "Q should not be infinity");
-
-  // 将 P256 Base 域坐标转换到证明域 E::Scalar（这里是 T256::Scalar）
-  let g_coords = g_p256.to_coordinates();
-  let gx_scalar: <E as Engine>::Scalar =
-    field_switch::<P256Base, <E as Engine>::Scalar>(g_coords.0);
-  let gy_scalar: <E as Engine>::Scalar =
-    field_switch::<P256Base, <E as Engine>::Scalar>(g_coords.1);
-
-  let qx_scalar: <E as Engine>::Scalar = field_switch::<P256Base, <E as Engine>::Scalar>(qx_base);
-  let qy_scalar: <E as Engine>::Scalar = field_switch::<P256Base, <E as Engine>::Scalar>(qy_base);
-
+  let secret = <E as Engine>::Scalar::random(&mut OsRng);
   let circuit =
-    EccDlCircuit::<<E as Engine>::Scalar>::new(scalar_bits, gx_scalar, gy_scalar, qx_scalar, qy_scalar);
+    P256DlCircuit::<<E as Engine>::Scalar>::new(secret);
 
   // 先仅生成形状，统计约束数量（未 padding 前）
   let shape =
