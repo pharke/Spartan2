@@ -680,12 +680,16 @@ impl<Scalar: PrimeField> BigNat<Scalar> {
   }
 }
 
+/// A representation of a polynomial over a field.
 pub struct Polynomial<Scalar: PrimeField> {
+  /// The coefficients of the polynomial
   pub coefficients: Vec<LinearCombination<Scalar>>,
+  /// The values of the polynomial (filled at witness-time)
   pub values: Option<Vec<Scalar>>,
 }
 
 impl<Scalar: PrimeField> Polynomial<Scalar> {
+  /// Allocate the product of two polynomials.
   pub fn alloc_product<CS: ConstraintSystem<Scalar>>(
     &self,
     mut cs: CS,
@@ -751,6 +755,7 @@ impl<Scalar: PrimeField> Polynomial<Scalar> {
     Ok(product)
   }
 
+  /// Sum two polynomials.
   pub fn sum(&self, other: &Self) -> Self {
     let n_coeffs = max(self.coefficients.len(), other.coefficients.len());
     let values = self.values.as_ref().and_then(|self_vs| {

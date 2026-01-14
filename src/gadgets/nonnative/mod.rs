@@ -31,8 +31,11 @@ impl<Scalar: PrimeField> BitAccess for Scalar {
   }
 }
 
-pub(crate) mod bignat;
-pub(crate) mod util;
+/// Big natural number arithmetic module for non-native field operations.
+pub mod bignat;
+
+/// Utility functions for non-native arithmetic operations.
+pub mod util;
 
 // Re-export BigNat and Num for external use
 pub use bignat::BigNat;

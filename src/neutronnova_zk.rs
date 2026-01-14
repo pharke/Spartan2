@@ -1283,9 +1283,10 @@ mod tests {
 
     fn shared<CS: ConstraintSystem<E::Scalar>>(
       &self,
-      _: &mut CS,
+      cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-      Ok(vec![]) // Placeholder, we don't use shared variables in this example
+      let secret = AllocatedNum::alloc(cs.namespace(|| "secret"), || Ok(E::Scalar::ONE))?;
+      Ok(vec![secret])
     }
 
     fn precommitted<CS: ConstraintSystem<E::Scalar>>(
