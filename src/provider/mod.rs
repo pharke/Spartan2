@@ -8,6 +8,7 @@
 
 // public modules to be used as an commitment engine with Spartan
 pub mod keccak;
+pub mod ntt;
 pub mod pasta;
 pub mod pcs;
 pub mod pt256;
