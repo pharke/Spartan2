@@ -1141,6 +1141,79 @@ impl<E: Engine> SplitR1CSInstance<E> {
     Ok(())
   }
 
+  /// Validate commitments and derive intermediate challenges from transcript.
+  /// This variant is intended for protocols where final challenges are derived
+  /// by an external protocol, so we do not compare against `self.challenges`.
+  pub fn validate_and_derive_intermediate(
+    &self,
+    S: &SplitR1CSShape<E>,
+    transcript: &mut E::TE,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    if S.num_shared > 0 {
+      if let Some(comm) = &self.comm_W_shared {
+        E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
+        transcript.absorb(b"comm_W_shared", comm);
+      } else {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "comm_W_shared is missing".to_string(),
+        });
+      }
+    }
+
+    if S.num_precommitted > 0 {
+      if let Some(comm) = &self.comm_W_precommitted {
+        E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
+        transcript.absorb(b"comm_W_precommitted", comm);
+      } else {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "comm_W_precommitted is missing".to_string(),
+        });
+      }
+    }
+
+    let intermediate_challenges = (0..S.num_challenges)
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+    E::PCS::check_commitment(&self.comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
+    transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
+
+    Ok(intermediate_challenges)
+  }
+
+  /// Validates commitments for external-challenge proving mode.
+  /// It checks all commitments but only advances transcript with `comm_W_rest`,
+  /// matching prover flow that consumes external challenges.
+  pub fn validate_external_challenge_instance(
+    &self,
+    S: &SplitR1CSShape<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(), SpartanError> {
+    if S.num_shared > 0 {
+      if let Some(comm) = &self.comm_W_shared {
+        E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
+      } else {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "comm_W_shared is missing".to_string(),
+        });
+      }
+    }
+
+    if S.num_precommitted > 0 {
+      if let Some(comm) = &self.comm_W_precommitted {
+        E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
+      } else {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "comm_W_precommitted is missing".to_string(),
+        });
+      }
+    }
+
+    E::PCS::check_commitment(&self.comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
+    transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
+    Ok(())
+  }
+
   pub fn to_regular_instance(&self) -> Result<R1CSInstance<E>, SpartanError> {
     let partial_comms = [
       self.comm_W_shared.clone(),

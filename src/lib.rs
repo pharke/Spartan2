@@ -45,6 +45,8 @@ pub mod traits;
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_zk; // Spartan with zero-knowledge 
+#[cfg(feature = "split-zk")]
+pub mod split_zk; // Split Spartan with externalized precommit flow
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

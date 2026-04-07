@@ -21,6 +21,7 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 itertools = "0.14.0"
 subtle = "2.5"
 generic-array = "0.14"
+typenum = "1.17"
 num-bigint = { version = "0.4", features = ["serde", "rand"] }
 num-traits = "0.2"
 num-integer = "0.1"
@@ -50,8 +51,9 @@ proptest = "1.2.0"
 
 
 [features]
-default = ["halo2curves/asm"]
+default = ["halo2curves/asm", "split-zk"]
 jem = ["tikv-jemallocator"]
+split-zk = []
 
 [profile.release]
 debug = 1

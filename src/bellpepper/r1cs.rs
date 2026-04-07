@@ -484,6 +484,100 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   }
 }
 
+impl<E: Engine> SatisfyingAssignment<E> {
+  /// Derive challenge scalars from precommitted witness commitments.
+  pub fn derive_precommitted_challenges(
+    ps: &PrecommittedState<E>,
+    S: &SplitR1CSShape<E>,
+    transcript: &mut E::TE,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    if let Some(comm_W_shared) = &ps.comm_W_shared {
+      transcript.absorb(b"comm_W_shared", comm_W_shared);
+    }
+    if let Some(comm_W_precommitted) = &ps.comm_W_precommitted {
+      transcript.absorb(b"comm_W_precommitted", comm_W_precommitted);
+    }
+
+    (0..S.num_challenges)
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()
+  }
+
+  /// Return an instance and witness using externally supplied challenges.
+  pub fn r1cs_instance_and_witness_with_external_challenges<C: SpartanCircuit<E>>(
+    ps: &mut PrecommittedState<E>,
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+    transcript: &mut E::TE,
+    challenges: &[E::Scalar],
+  ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("circuit_synthesize_rest_external_challenges");
+    if challenges.len() != S.num_challenges {
+      return Err(SpartanError::SynthesisError {
+        reason: format!(
+          "External challenges length mismatch: expected {}, got {}",
+          S.num_challenges,
+          challenges.len()
+        ),
+      });
+    }
+
+    circuit
+      .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(challenges))
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize witness: {e}"),
+      })?;
+
+    ps.W
+      [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+      .copy_from_slice(
+        &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
+          ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
+      );
+
+    let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
+    let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
+    let comm_W_rest = PCS::<E>::commit(
+      ck,
+      &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
+      &r_W_rest,
+      is_small,
+    )?;
+    info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
+    transcript.absorb(b"comm_W_rest", &comm_W_rest);
+
+    let public_values = ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec();
+    let U = SplitR1CSInstance::<E>::new(
+      S,
+      ps.comm_W_shared.clone(),
+      ps.comm_W_precommitted.clone(),
+      comm_W_rest,
+      public_values,
+      challenges.to_vec(),
+    )?;
+
+    let mut blinds = Vec::with_capacity(3);
+    if let Some(r_W_shared) = &ps.r_W_shared {
+      blinds.push(r_W_shared.clone());
+    }
+    if let Some(r_W_precommitted) = &ps.r_W_precommitted {
+      blinds.push(r_W_precommitted.clone());
+    }
+    blinds.push(r_W_rest);
+
+    let r_W = PCS::<E>::combine_blinds(&blinds)?;
+    let W = R1CSWitness::<E>::new_unchecked(ps.W.clone(), r_W, is_small)?;
+    info!(
+      elapsed_ms = %synth_t.elapsed().as_millis(),
+      "circuit_synthesize_rest_external_challenges"
+    );
+
+    Ok((U, W))
+  }
+}
+
 impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
   fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
   where
