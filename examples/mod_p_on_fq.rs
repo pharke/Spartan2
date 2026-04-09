@@ -71,13 +71,13 @@ use spartan2::{
     BigInt::from_bytes_le(Sign::Plus, x.to_repr().as_ref())
   }
 
-  /// 与 `synthesize` 中 BigNat 语义一致：先 `(c*x) mod p`，再 `(· + u) mod p`，最后 `mod q`。
+  /// 与 `synthesize` 中 BigNat 语义一致：先 `(u + x)`，再 `(c * ·) mod p`，最后 `mod q`。
   fn d_bigint_matching_circuit(u: &BigInt, x: &BigInt, c: &BigInt) -> BigInt {
     let p = modulus_p();
     let q = modulus_q();
-    let cx_mod_p = (c * x) % &p;
-    let sum_mod_p = (&cx_mod_p + u) % &p;
-    sum_mod_p % &q
+    let sum = u + x;
+    let cux_mod_p = (c * sum) % &p;
+    cux_mod_p % &q
   }
   
   /// 最简单的模 p 电路： 设 q < p,
@@ -157,12 +157,6 @@ use spartan2::{
       challenges: Option<&[Ec::Scalar]>,
     ) -> Result<(), SynthesisError> {
       // 1. 创建所有的模数常量
-      let modulus_q = BigNat::alloc_from_nat(
-        cs.namespace(|| "modulus_q"),
-        || Ok(modulus_q()),
-        LIMB_WIDTH,
-        N_LIMBS,
-      )?;
       let modulus_p = BigNat::alloc_from_nat(
         cs.namespace(|| "modulus_p"),
         || Ok(modulus_p()),
@@ -174,11 +168,10 @@ use spartan2::{
       let u_value_q = allocated_num_to_bignat(cs, "u_value_q_bignat", precommitted[0].clone());
       let x_value_q = allocated_num_to_bignat(cs, "x_value_q_bignat", precommitted[1].clone());
 
-      // 3. 分配公开的 d_value_q
+      // 3. 分配公开的 d_value_q（关系域元素）
       let d_output = AllocatedNum::alloc_input(cs.namespace(|| "d_value_q_input"), || {
         Ok(nat_to_f(&self.d_value_q).unwrap())
       })?;
-      let d_output_bignat = allocated_num_to_bignat(cs, "d_output_bignat", d_output);
       
       // 3. 读取挑战 c（第二个公开输入）并转换为 BigNat
       let c_input = AllocatedNum::alloc_input(cs.namespace(|| "c_input"), || {
@@ -186,12 +179,19 @@ use spartan2::{
       })?;
       let c = allocated_num_to_bignat(cs, "c_input_bignat", c_input);
       
-      // 4. 计算公开的 d_value_ q
-      let (_quotient, remainder) = c.mult_mod(cs.namespace(|| "cx mod p"), &x_value_q, &modulus_p)?;
-      let d_value_q = remainder.add(&u_value_q)?.red_mod(cs.namespace(|| "u+cx mod p"), &modulus_p)?.red_mod(cs.namespace(|| "u+cx mod p mod q"), &modulus_q)?;
+      // 4. 改为 d = c * (u + x) mod p
+      let sum_ux = u_value_q.add(&x_value_q)?;
+      let (_quotient, d_value_mod_p) =
+        c.mult_mod(cs.namespace(|| "c*(u+x) mod p"), &sum_ux, &modulus_p)?;
 
-      // 5. 约束 d_value_q == d_output_bignat
-      d_value_q.equal_when_carried_regroup(cs.namespace(|| "d_value_q equality"), &d_output_bignat)?;
+      // 5. 不再显式做整数 mod q，而是将 mod p 的结果重组成关系域元素并与公开输入比较
+      //    这证明的是域同余语义：d_output == d_value_mod_p (mod q)
+      let d_output_num = Num::new(
+        d_output.get_value().as_ref().copied(),
+        LinearCombination::zero() + d_output.get_variable(),
+      );
+      let d_mod_p_bits = d_value_mod_p.decompose(cs.namespace(|| "d_value_mod_p_bits"))?;
+      d_output_num.is_equal(cs.namespace(|| "d_output == d_value_mod_p in Fq"), &d_mod_p_bits);
       Ok(())
     }
   }
