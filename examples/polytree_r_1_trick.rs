@@ -4,7 +4,18 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! Relation \Rel_{1}（ECC + mod-p 示例）
+//! Relation \Rel_{1}（ECC + mod-p 示例）— **trick 版**（`polytree_r_1_trick`）
+//!
+//! 与 `polytree_r_1.rs` 的语义相同，仅 **`o2` 的标量乘路径**不同：
+//!
+//! - **不再**对 `o2` 做全长 `field_into_allocated_bits_le`（~255 bit），改为 **固定 128 个** witness 布尔位
+//!   `b_0..b_127`（LSB→MSB），一条打包约束 `o2 = Σ 2^i b_i`，再一条 **`packed == precommitted o2`**。
+//!   在 `p > 2^128` 下，这已蕴涵 **`o2` 作为无符号整数 `< 2^128`**，无需额外 `lt_constant`。
+//! - **`const_base_pow2_mul_with_slack` 只消费这 128 位**，不完整加循环从 ~254 轮降到 **127 轮**，用于把门数压档。
+//!
+//! **协议假设**：本关系中的标量 `o2` 仅取 `< 2^128`；宿主侧 `vesta::Scalar` 必须与该整数一致。
+//!
+//! ---
 //!
 //! 公开输入：c, delta[2], K(x,y), C1(x,y)
 //! precommitted：x', o2, mu[2], V(x,y)
@@ -15,12 +26,10 @@
 //!   并用 `lt_constant` 约束 `k < ⌊(p−1)/q⌋+1` 与 **`x' < q`**（q = |Fr(vesta)|，p 为关系域模数）。
 //! - delta_0 = c*(mu_0 + x') mod p
 //! - delta_1 = c*(mu_1 + o2) mod p
-
-use bellpepper::gadgets::boolean::field_into_allocated_bits_le;
 use bellpepper_core::{
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
-  ConstraintSystem, SynthesisError,
+  ConstraintSystem, LinearCombination, SynthesisError,
 };
 use ff::{Field, PrimeField, PrimeFieldBits};
 use num_bigint::{BigInt, BigUint, Sign};
@@ -49,6 +58,9 @@ type RelField = <E as Engine>::Scalar; // pallas::Scalar == vesta::Base (Fq)
 type CurveG = vesta::Point;
 type VestaBase = vesta::Base;
 type PModField = RelField; // delta works in relation field (mod p)
+
+/// 用于 `[o2]K` 的 bit 数；固定基乘与打包均以此为长度。
+const O2_BITS: usize = 128;
 
 fn modulus_p() -> BigInt {
   let modules_uint = BigUint::from_str_radix(&PModField::MODULUS[2..], 16).unwrap();
@@ -85,8 +97,8 @@ fn k_lt_bound_exclusive() -> BigUint {
 /// 对 `bit_1…bit_{n-1}` 在**宿主侧**递推当前 `2^i K`，转换为 `(ox, oy)` 后做
 /// `add_incomplete_const` + `conditionally_select`；再对 `bit_0` 做与 `scalar_mul` 相同的 slack。
 ///
-/// `k_curve` 须为仿射点。`allocated_bits` 至少含 1 位（用于 `bit_0` slack）；长度须与
-/// `field_into_allocated_bits_le` 一致（与原先 `scalar_mul` 相同位序）。
+/// `k_curve` 须为仿射点。`allocated_bits` 至少含 1 位（用于 `bit_0` slack）；长度 = 参与乘法的标量位数
+///（本 trick 为 [`O2_BITS`]，LSB 在索引 0）。
 fn const_base_pow2_mul_with_slack<CS: ConstraintSystem<RelField>>(
   mut cs: CS,
   k_curve: CurveG,
@@ -138,6 +150,63 @@ fn const_base_pow2_mul_with_slack<CS: ConstraintSystem<RelField>>(
     &acc_minus_k,
     &Boolean::from(allocated_bits[0].clone()),
   )
+}
+
+/// 从 `o2` 的规范整数取低 `O2_BITS` 位（LSB 在索引 0）；宿主须保证高位全 0。
+fn o2_le_bits_128(val: Option<RelField>) -> [bool; O2_BITS] {
+  let mut out = [false; O2_BITS];
+  if let Some(v) = val {
+    let bu = BigUint::from_bytes_le(v.to_repr().as_ref());
+    for i in 0..O2_BITS {
+      out[i] = bu.bit(i as u64);
+    }
+  }
+  out
+}
+
+/// 分配 `O2_BITS` 个布尔位，打包为 `o2_packed`，并约束 `o2_packed == o2`。
+fn allocate_o2_bits_and_pack<CS: ConstraintSystem<RelField>>(
+  mut cs: CS,
+  o2: &AllocatedNum<RelField>,
+) -> Result<Vec<AllocatedBit>, SynthesisError> {
+  let bits_witness = o2_le_bits_128(o2.get_value().as_ref().copied());
+  let mut bits = Vec::with_capacity(O2_BITS);
+  for i in 0..O2_BITS {
+    let b = AllocatedBit::alloc(
+      cs.namespace(|| format!("o2_bit_{i}")),
+      Some(bits_witness[i]),
+    )?;
+    bits.push(b);
+  }
+
+  let o2_packed = AllocatedNum::alloc(cs.namespace(|| "o2_packed_from_bits"), || {
+    let v = o2.get_value().ok_or(SynthesisError::AssignmentMissing)?;
+    Ok(v)
+  })?;
+
+  cs.enforce(
+    || "pack o2 bits (LE)",
+    |_| {
+      let mut acc = LinearCombination::<RelField>::zero();
+      let mut coeff = RelField::ONE;
+      for b in &bits {
+        acc = acc + (coeff, b.get_variable());
+        coeff = coeff + coeff;
+      }
+      acc
+    },
+    |lc| lc + CS::one(),
+    |lc| lc + o2_packed.get_variable(),
+  );
+
+  cs.enforce(
+    || "packed o2 == precommitted o2",
+    |lc| lc + o2_packed.get_variable() - o2.get_variable(),
+    |lc| lc + CS::one(),
+    |lc| lc,
+  );
+
+  Ok(bits)
 }
 
 #[derive(Clone, Debug)]
@@ -214,8 +283,8 @@ impl SpartanCircuit<E> for PolyTreeR1Circuit<RelField> {
     cs.enforce(|| "C1x bind", |lc| lc + c1.x.get_variable() - c1x_pub.get_variable(), |lc| lc + CS::one(), |lc| lc);
     cs.enforce(|| "C1y bind", |lc| lc + c1.y.get_variable() - c1y_pub.get_variable(), |lc| lc + CS::one(), |lc| lc);
 
-    let o2_bits = field_into_allocated_bits_le(cs.namespace(|| "o2_bits"), o2.get_value().as_ref().copied())?;
-    // 固定基 K = 生成元：用不完整加 + bit_0 slack，避免 `scalar_mul` 的倍点链。
+    let o2_bits = allocate_o2_bits_and_pack(cs.namespace(|| "o2_bits_128"), &o2)?;
+    // 固定基 K = 生成元：仅按 O2_BITS 位做不完整加 + bit_0 slack。
     let o2k = const_base_pow2_mul_with_slack(
       cs.namespace(|| "[o2]K_fixed_base"),
       CurveG::generator(),
@@ -282,7 +351,8 @@ fn main() {
   let mut rng = OsRng;
 
   let c = RelField::random(&mut rng);
-  let o2 = RelField::from(5u64); // keep scalar small for demo
+  // 须 < 2^128；与 128-bit 打包及 vesta::Scalar 一致。
+  let o2 = RelField::from(5u64);
   let mu0 = RelField::random(&mut rng);
   let mu1 = RelField::random(&mut rng);
 
@@ -333,12 +403,15 @@ fn main() {
   };
 
   let shape = <ShapeCS<E> as SpartanShape<E>>::r1cs_shape(&circuit).expect("shape");
-  info!("PolyTreeR1: num_constraints_unpadded = {}", shape.sizes()[0]);
+  info!(
+    "PolyTreeR1 trick (o2_bits={O2_BITS}): num_constraints_unpadded = {}",
+    shape.sizes()[0]
+  );
 
   let (pk, vk) = SpartanZkSNARK::<E>::setup(circuit.clone()).expect("setup failed");
   let prep: SpartanPrepZkSNARK<E> =
     SpartanZkSNARK::<E>::prep_prove(&pk, circuit.clone(), false).expect("prep_prove failed");
   let proof = SpartanZkSNARK::<E>::prove(&pk, circuit.clone(), &prep, false).expect("prove failed");
   proof.verify(&vk).expect("verify failed");
-  info!("PolyTreeR1 example completed successfully");
+  info!("PolyTreeR1 trick example completed successfully");
 }

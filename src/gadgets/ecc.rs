@@ -751,6 +751,68 @@ where
     })
   }
 
+  /// 与 [`Self::add_incomplete`] 相同的不完整弦切加，但第二个点由 **常量** 仿射坐标 `(other_x, other_y)`
+  ///（已嵌入 `E::Scalar` 的曲线基域元素）给出，不为其分配 witness 变量。
+  ///
+  /// 仍假设 `self` 与 `(other_x, other_y)` 互不为对方取负且 x 坐标不同（与 [`Self::add_incomplete`] 相同）。
+  pub fn add_incomplete_const<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    mut cs: CS,
+    other_x: E::Scalar,
+    other_y: E::Scalar,
+  ) -> Result<Self, SynthesisError> {
+    let lambda = AllocatedNum::alloc(cs.namespace(|| "lambda"), || {
+      if other_x == *self.x.get_value().get()? {
+        Ok(E::Scalar::ONE)
+      } else {
+        Ok(
+          (other_y - *self.y.get_value().get()?)
+            * (other_x - *self.x.get_value().get()?).invert().unwrap(),
+        )
+      }
+    })?;
+    cs.enforce(
+      || "Check that lambda is computed correctly",
+      |lc| lc + lambda.get_variable(),
+      |lc| lc + (other_x, CS::one()) - self.x.get_variable(),
+      |lc| lc + (other_y, CS::one()) - self.y.get_variable(),
+    );
+
+    let x = AllocatedNum::alloc(cs.namespace(|| "x"), || {
+      Ok(
+        *lambda.get_value().get()? * lambda.get_value().get()?
+          - *self.x.get_value().get()?
+          - other_x,
+      )
+    })?;
+    cs.enforce(
+      || "check that x is correct",
+      |lc| lc + lambda.get_variable(),
+      |lc| lc + lambda.get_variable(),
+      |lc| lc + x.get_variable() + self.x.get_variable() + (other_x, CS::one()),
+    );
+
+    let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
+      Ok(
+        *lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?)
+          - *self.y.get_value().get()?,
+      )
+    })?;
+
+    cs.enforce(
+      || "Check that y is correct",
+      |lc| lc + lambda.get_variable(),
+      |lc| lc + self.x.get_variable() - x.get_variable(),
+      |lc| lc + y.get_variable() + self.y.get_variable(),
+    );
+
+    Ok(Self {
+      x,
+      y,
+      _marker: PhantomData,
+    })
+  }
+
   /// doubles the point; since this is called with a point not at infinity, it is guaranteed to be not infinity
   pub fn double_incomplete<CS: ConstraintSystem<E::Scalar>>(
     &self,
